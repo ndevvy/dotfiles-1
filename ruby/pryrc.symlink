@@ -1,0 +1,84 @@
+Pry.config.editor = 'b"'
+
+if defined?(PryByebug)
+  Pry.commands.alias_command 'c', 'continue'
+  Pry.commands.alias_command 's', 'step'
+  Pry.commands.alias_command 'n', 'next'
+  Pry.commands.alias_command 'f', 'finish'
+end
+
+Pry::Commands.command(/^$/, 'repeat last command') do
+  _pry_.run_command Pry.history.to_a.last
+end
+
+Pry::Commands.block_command 'H', 'history' do
+  run 'hist -e -a -T 50 -n'
+end
+Pry::Commands.block_command('enable-pry', 'Enable `binding.pry` feature') do
+  ENV['DISABLE_PRY'] = nil
+end
+Pry.commands.alias_command 'dp', 'disable-pry'
+Pry.commands.alias_command 'ep', 'enable-pry'
+
+module LogQuerySource
+  @@NUM_DEBUG_LINES = 0
+  @@NUM_QUERIES = 0
+
+  def debug(*args, &block)
+    return unless super
+
+    backtrace = Rails.backtrace_cleaner.clean caller
+
+    relevant_caller_lines = backtrace.reject { |caller_line|
+      caller_line.include?('/initializers/')
+    }.first(@@NUM_DEBUG_LINES)
+    @@NUM_QUERIES += 1
+
+    if relevant_caller_lines
+      relevant_caller_lines.each do |relevant_caller_line|
+        logger.debug(" [#{@@NUM_QUERIES}] ↳ #{relevant_caller_line.sub("#{Rails.root}/", '')}")
+      end
+    end
+  end
+end
+
+# Don't mess with vanilla pry
+if defined?(Rails)
+  # ,-----------------------------------------------------------
+  # | !debug : ActiveRecord query logging + set log level :debug
+  # `-----------------------------------------------------------
+  Pry::Commands.block_command('!debug', 'Enable debug logging. Pass in an optional number of backtrace lines to print out.') do |*args|
+    num_debug_lines = args.length > 0 ? args[0].to_i : 1
+    LogQuerySource.class_variable_set(:@@NUM_DEBUG_LINES, num_debug_lines.to_i)
+    LogQuerySource.class_variable_set(:@@NUM_QUERIES, 0)
+    Rails.logger.level = :debug
+    ActiveRecord::LogSubscriber.__send__(:prepend, LogQuerySource)
+    ActiveRecord::Base.logger = Logger.new(STDOUT)
+  end
+
+  # ,------------------------------------
+  # | Backtrace
+  # `------------------------------------
+  # Drop backtrace lines outside the app
+  def _simplify_backtrace(backtrace)
+    backtrace.map { |line|
+      if (line.start_with?('/app/', '/code/'))
+        line.red
+      else
+        '[... (use wtf?)]'.light_black
+      end
+    }.chunk { |x| x }.map(&:first)
+  end
+
+  Pry.config.exception_handler = proc do |output, exception, _pry_|
+    output.puts "#{exception.class}: #{exception.message}".light_red.underline
+    output.puts _simplify_backtrace(exception.backtrace)
+  end
+
+  # ,------------------------------------
+  # | Set PG application_name
+  # `------------------------------------
+  ActiveRecord::Base.set_application_name("rails_console: #{ENV['STARTED_BY']}") if ENV['STARTED_BY'].present?
+end
+
+Pry.config.completer = Pry::BondCompleter
